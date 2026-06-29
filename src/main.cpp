@@ -39,31 +39,39 @@ volatile long encoderRightTicks = 0;
 #define SIDE_RIGHT 4
 
 /* =========================
+   CONFIGURATION PARAMETERS
+========================= */
+// Sensor settings
+int sharpModel = SharpIR::GP2Y0A21YK0F;       // default GP2Y0A21YK0F (10-80cm) analog model
+int enemyDetectionThresholdCm = 50;         // max distance in cm to trigger enemy detection
+int qtrLineThreshold = 500;                 // raw reflectance below this = white line detected
+int qtrDebounceThreshold = 2;               // consecutive loop cycles to confirm edge detection
+
+// Behavior timings
+uint32_t enemyLostTimeoutMs = 250;          // short-term memory to keep charging on sensor dropout
+uint32_t lungeDurationMs = 400;             // initial startup lunge duration
+uint32_t searchFlipDurationMs = 1500;       // how often search direction is inverted
+uint32_t motorKeepaliveMs = 50;             // keepalive interval for serial motor command throttle
+
+// Speed settings (0 to 255)
+int motorBaseSpeed = 180;
+int motorTurnSpeed = 160;
+int motorAttackSpeed = 255;
+
+/* =========================
    LIBRARY INSTANTIATIONS
 ========================= */
-// Sharp IR configurations
-#define SHARP_MODEL SharpIR::GP2Y0A21YK0F // default 10-80cm analog model
-const uint8_t DETECTION_THRESHOLD_CM = 50; // detect enemy if closer than 50cm
-
-SharpIR enemyFL(SHARP_MODEL, FRONT_LEFT);
-SharpIR enemyFC(SHARP_MODEL, FRONT_CENTER);
-SharpIR enemyFR(SHARP_MODEL, FRONT_RIGHT);
-SharpIR enemySL(SHARP_MODEL, SIDE_LEFT);
-SharpIR enemySR(SHARP_MODEL, SIDE_RIGHT);
+SharpIR enemyFL(sharpModel, FRONT_LEFT);
+SharpIR enemyFC(sharpModel, FRONT_CENTER);
+SharpIR enemyFR(sharpModel, FRONT_RIGHT);
+SharpIR enemySL(sharpModel, SIDE_LEFT);
+SharpIR enemySR(sharpModel, SIDE_RIGHT);
 
 // QTR reflectance sensor configurations
 QTRSensors qtr;
 const uint8_t QTR_SENSOR_COUNT = 4;
 uint16_t qtrValues[QTR_SENSOR_COUNT];
-const uint16_t QTR_THRESHOLD = 500; // raw readings below this = white line detected
 // #define QTR_USE_ANALOG // uncomment if using analog QTR sensors
-
-/* =========================
-   MOTOR CONTROL PARAMS
-========================= */
-int baseSpeed = 180;
-int turnSpeed = 160;
-int attackSpeed = 255;
 
 /* =========================
    STATE MACHINE
@@ -79,11 +87,9 @@ State currentState = LUNGE; // start with initial lunge
 
 // Software debouncing for line sensors
 uint8_t lineTriggerCount[4] = {0, 0, 0, 0};
-const uint8_t DEBOUNCE_THRESHOLD = 2; // consecutive loop cycles to confirm edge
 
 // Target tracking memory variables
 uint32_t lastSeenTime = 0;
-const uint32_t TARGET_LOST_TIMEOUT_MS = 250;
 int lastAttackLeftSpeed = 0;
 int lastAttackRightSpeed = 0;
 
@@ -97,12 +103,10 @@ int spinRightSpeed = 0;
 
 // Lunge state variables
 uint32_t lungeStartTime = 0;
-const uint32_t LUNGE_DURATION_MS = 400;
 
 // Spiral search variables
 uint32_t searchStartTime = 0;
 int searchSpinSign = 1; // 1 = spin right, -1 = spin left
-const uint32_t SEARCH_FLIP_MS = 1500; // flip direction every 1.5s
 
 // State name lookup for debug logging
 const char* stateNames[] = {"SEARCH", "ATTACK", "RECOVER", "LUNGE"};
@@ -116,39 +120,39 @@ void enterState(State newState) {
     recoveryStartTime = millis();
     recoveryPhase = 1; // start in straight escape phase
 
-    // Capture which sensors triggered the edge
-    bool fl = (digitalRead(LINE_FL) == LOW);
-    bool fr = (digitalRead(LINE_FR) == LOW);
-    bool bl = (digitalRead(LINE_BL) == LOW);
-    bool br = (digitalRead(LINE_BR) == LOW);
+    // Capture which sensors triggered the edge (using QTR raw values and threshold)
+    bool fl = (qtrValues[0] < qtrLineThreshold);
+    bool fr = (qtrValues[1] < qtrLineThreshold);
+    bool bl = (qtrValues[2] < qtrLineThreshold);
+    bool br = (qtrValues[3] < qtrLineThreshold);
 
     if (fl || fr) {
       // Front edge detected -> go backward
-      escapeLeftSpeed = -baseSpeed;
-      escapeRightSpeed = -baseSpeed;
+      escapeLeftSpeed = -motorBaseSpeed;
+      escapeRightSpeed = -motorBaseSpeed;
       if (fl && !fr) {
-        spinLeftSpeed = turnSpeed;
-        spinRightSpeed = -turnSpeed;
+        spinLeftSpeed = motorTurnSpeed;
+        spinRightSpeed = -motorTurnSpeed;
       } else {
-        spinLeftSpeed = -turnSpeed;
-        spinRightSpeed = turnSpeed;
+        spinLeftSpeed = -motorTurnSpeed;
+        spinRightSpeed = motorTurnSpeed;
       }
     } else if (bl || br) {
       // Back edge detected -> go forward
-      escapeLeftSpeed = baseSpeed;
-      escapeRightSpeed = baseSpeed;
+      escapeLeftSpeed = motorBaseSpeed;
+      escapeRightSpeed = motorBaseSpeed;
       if (bl && !br) {
-        spinLeftSpeed = turnSpeed;
-        spinRightSpeed = -turnSpeed;
+        spinLeftSpeed = motorTurnSpeed;
+        spinRightSpeed = -motorTurnSpeed;
       } else {
-        spinLeftSpeed = -turnSpeed;
-        spinRightSpeed = turnSpeed;
+        spinLeftSpeed = -motorTurnSpeed;
+        spinRightSpeed = motorTurnSpeed;
       }
     } else {
-      escapeLeftSpeed = -baseSpeed;
-      escapeRightSpeed = -baseSpeed;
-      spinLeftSpeed = turnSpeed;
-      spinRightSpeed = -turnSpeed;
+      escapeLeftSpeed = -motorBaseSpeed;
+      escapeRightSpeed = -motorBaseSpeed;
+      spinLeftSpeed = motorTurnSpeed;
+      spinRightSpeed = -motorTurnSpeed;
     }
   } else {
     recoveryPhase = 0;
@@ -178,7 +182,6 @@ void enterState(State newState) {
 int lastMotorLeft = 0;
 int lastMotorRight = 0;
 uint32_t lastMotorWriteTime = 0;
-const uint32_t MOTOR_KEEPALIVE_MS = 50;
 
 void setMotor(int left, int right) {
   left = constrain(left, -255, 255);
@@ -186,7 +189,7 @@ void setMotor(int left, int right) {
 
   // Skip write if values unchanged and keepalive not due
   bool changed = (left != lastMotorLeft) || (right != lastMotorRight);
-  bool keepalive = (millis() - lastMotorWriteTime >= MOTOR_KEEPALIVE_MS);
+  bool keepalive = (millis() - lastMotorWriteTime >= motorKeepaliveMs);
   if (!changed && !keepalive) return;
 
   lastMotorLeft = left;
@@ -229,7 +232,7 @@ struct EnemySensors {
   bool sideRight;
 };
 
-// Returns a bitmask of triggered line sensors (raw value < QTR_THRESHOLD = triggered).
+// Returns a bitmask of triggered line sensors (raw value < qtrLineThreshold = triggered).
 // Bit 0: FL, Bit 1: FR, Bit 2: BL, Bit 3: BR.
 // Software debounced to filter optical/electrical noise spikes.
 uint8_t readLineSensors() {
@@ -237,15 +240,15 @@ uint8_t readLineSensors() {
   qtr.read(qtrValues);
 
   for (int i = 0; i < QTR_SENSOR_COUNT; i++) {
-    if (qtrValues[i] < QTR_THRESHOLD) {
-      if (lineTriggerCount[i] < DEBOUNCE_THRESHOLD) {
+    if (qtrValues[i] < qtrLineThreshold) {
+      if (lineTriggerCount[i] < qtrDebounceThreshold) {
         lineTriggerCount[i]++;
       }
     } else {
       lineTriggerCount[i] = 0;
     }
 
-    if (lineTriggerCount[i] >= DEBOUNCE_THRESHOLD) {
+    if (lineTriggerCount[i] >= qtrDebounceThreshold) {
       mask |= (1 << i);
     }
   }
@@ -263,11 +266,11 @@ EnemySensors readEnemySensors() {
   int distSR = enemySR.getDistance(false);
 
   // Consider detected if distance falls within the detection threshold
-  sensors.frontLeft = (distFL > 0 && distFL <= DETECTION_THRESHOLD_CM);
-  sensors.frontCenter = (distFC > 0 && distFC <= DETECTION_THRESHOLD_CM);
-  sensors.frontRight = (distFR > 0 && distFR <= DETECTION_THRESHOLD_CM);
-  sensors.sideLeft = (distSL > 0 && distSL <= DETECTION_THRESHOLD_CM);
-  sensors.sideRight = (distSR > 0 && distSR <= DETECTION_THRESHOLD_CM);
+  sensors.frontLeft = (distFL > 0 && distFL <= enemyDetectionThresholdCm);
+  sensors.frontCenter = (distFC > 0 && distFC <= enemyDetectionThresholdCm);
+  sensors.frontRight = (distFR > 0 && distFR <= enemyDetectionThresholdCm);
+  sensors.sideLeft = (distSL > 0 && distSL <= enemyDetectionThresholdCm);
+  sensors.sideRight = (distSR > 0 && distSR <= enemyDetectionThresholdCm);
 
   return sensors;
 }
@@ -300,22 +303,22 @@ void attack() {
   EnemySensors sensors = readEnemySensors();
   // Charge straight if center is active, OR if both left and right are active (balanced targets)
   if (sensors.frontCenter || (sensors.frontLeft && sensors.frontRight)) {
-    lastAttackLeftSpeed = attackSpeed;
-    lastAttackRightSpeed = attackSpeed;
+    lastAttackLeftSpeed = motorAttackSpeed;
+    lastAttackRightSpeed = motorAttackSpeed;
   }
   else if (sensors.frontLeft) {
-    lastAttackLeftSpeed = turnSpeed;
-    lastAttackRightSpeed = attackSpeed;
+    lastAttackLeftSpeed = motorTurnSpeed;
+    lastAttackRightSpeed = motorAttackSpeed;
   }
   else if (sensors.frontRight) {
-    lastAttackLeftSpeed = attackSpeed;
-    lastAttackRightSpeed = turnSpeed;
+    lastAttackLeftSpeed = motorAttackSpeed;
+    lastAttackRightSpeed = motorTurnSpeed;
   }
   
   // If we haven't tracked any direction yet, default to driving forward
   if (lastAttackLeftSpeed == 0 && lastAttackRightSpeed == 0) {
-    lastAttackLeftSpeed = baseSpeed;
-    lastAttackRightSpeed = baseSpeed;
+    lastAttackLeftSpeed = motorBaseSpeed;
+    lastAttackRightSpeed = motorBaseSpeed;
   }
 
   setMotor(lastAttackLeftSpeed, lastAttackRightSpeed);
@@ -331,16 +334,16 @@ void searchOpponent() {
 
   // Side sensor overrides: spin toward detected enemy
   if (sensors.sideLeft) {
-    setMotor(-turnSpeed, turnSpeed); // spin left
+    setMotor(-motorTurnSpeed, motorTurnSpeed); // spin left
     return;
   }
   if (sensors.sideRight) {
-    setMotor(turnSpeed, -turnSpeed); // spin right
+    setMotor(motorTurnSpeed, -motorTurnSpeed); // spin right
     return;
   }
 
-  // Flip spin direction every SEARCH_FLIP_MS
-  if (millis() - searchStartTime >= SEARCH_FLIP_MS) {
+  // Flip spin direction every searchFlipDurationMs
+  if (millis() - searchStartTime >= searchFlipDurationMs) {
     searchSpinSign = -searchSpinSign;
     searchStartTime = millis();
   }
@@ -434,7 +437,7 @@ void loop() {
     if (enemyFront) {
       lastSeenTime = millis();
       enterState(ATTACK);
-    } else if (millis() - lungeStartTime >= LUNGE_DURATION_MS) {
+    } else if (millis() - lungeStartTime >= lungeDurationMs) {
       enterState(SEARCH);
     }
   } else if (currentState != RECOVER) {
@@ -446,7 +449,7 @@ void loop() {
       }
     } else {
       bool holdAttack = (currentState == ATTACK) && 
-                         (millis() - lastSeenTime < TARGET_LOST_TIMEOUT_MS) &&
+                         (millis() - lastSeenTime < enemyLostTimeoutMs) &&
                          !sideLeftDetected() && !sideRightDetected();
       if (!holdAttack) {
         if (currentState != SEARCH) {
@@ -459,7 +462,7 @@ void loop() {
   // State Execution
   switch (currentState) {
     case LUNGE:
-      setMotor(attackSpeed, attackSpeed); // full speed ahead
+      setMotor(motorAttackSpeed, motorAttackSpeed); // full speed ahead
       break;
 
     case RECOVER:
