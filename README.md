@@ -64,6 +64,26 @@ This state has the **highest priority** and cannot be overridden by combat behav
 
 ---
 
+## Configuration Parameters
+
+All operational thresholds, timings, speeds, and sensor models are consolidated in the `CONFIGURATION PARAMETERS` section at the top of `main.cpp` for quick and easy adjustment:
+
+- **Sensor Thresholds:** `sharpModel`, `enemyDetectionThresholdCm`, `qtrLineThreshold`, `qtrDebounceThreshold`
+- **Behavior Durations:** `enemyLostTimeoutMs`, `lungeDurationMs`, `searchFlipDurationMs`, `motorKeepaliveMs`
+- **Speeds (0 to 255):** `motorBaseSpeed`, `motorTurnSpeed`, `motorAttackSpeed`
+
+---
+
+## Hardware Test Files
+
+Three standalone test sketches are provided under the `test/` directory to facilitate manual hardware verification and calibration:
+
+1. **[test_ir.cpp](file:///c:/Users/User/Documents/PlatformIO/Projects/SUMO%20Robot/test/test_ir.cpp):** Prints live distance outputs from the 5 Sharp IR sensors in centimeters to calibrate `enemyDetectionThresholdCm`.
+2. **[test_qtr.cpp](file:///c:/Users/User/Documents/PlatformIO/Projects/SUMO%20Robot/test/test_qtr.cpp):** Prints raw reflectance sensor counts to calibrate the `qtrLineThreshold` (black ring vs. white line values).
+3. **[test_motors.cpp](file:///c:/Users/User/Documents/PlatformIO/Projects/SUMO%20Robot/test/test_motors.cpp):** Runs the motors through a basic sequence (forward, reverse, turns, stop) to verify physical wiring and Cytron serial commands.
+
+---
+
 ## Safety & Reliability Enhancements
 
 1. **Line Sensor Debouncing:** Avoids false recovery triggers caused by electrical noise or arena scratches by requiring a line sensor to remain `LOW` for at least 2 consecutive loops (20ms) before entering `RECOVER`.
