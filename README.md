@@ -49,10 +49,10 @@ If no enemy is visible, the robot enters the `SEARCH` state to locate the oppone
 ### 3. ATTACK State (Lock & Charge)
 Triggered when the opponent is detected by any of the front sensors (`FRONT_LEFT`, `FRONT_CENTER`, `FRONT_RIGHT`).
 - **Steering Control:**
-  - **Center Sensor Active:** Charges straight ahead at maximum speed (`255, 255`).
-  - **Left Sensor Active:** Steers left (`160, 255`) to center the target.
-  - **Right Sensor Active:** Steers right (`255, 160`) to center the target.
-- **Tracking Memory:** If the opponent moves out of the front sensors (sensor dropout), the robot holds the `ATTACK` state and continues charging in the last tracked direction for **250ms**. It will instantly revert to `SEARCH` if the opponent is seen on the side sensors or if the timeout expires.
+  - **Center Sensor Active OR Left + Right Sensors Active:** Charges straight ahead at maximum speed (`255, 255`). This balanced response allows the robot to plow straight into the center of a group of opponents or hit a wide robot dead-center, rather than oscillating or turning away from one of them.
+  - **Left Sensor Active (only):** Steers left (`160, 255`) to center the target.
+  - **Right Sensor Active (only):** Steers right (`255, 160`) to center the target.
+- **Tracking Memory:** If all front sensors lose detection (momentary target dropout), the robot holds the `ATTACK` state and continues charging in the last tracked direction for **250ms**. It will instantly revert to `SEARCH` if the opponent is seen on the side sensors or if the timeout expires.
 
 ### 4. RECOVER State (Edge Avoidance)
 This state has the **highest priority** and cannot be overridden by combat behaviors.

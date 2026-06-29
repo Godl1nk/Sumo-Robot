@@ -261,7 +261,8 @@ bool sideRightDetected() {
 ========================= */
 void attack() {
   EnemySensors sensors = readEnemySensors();
-  if (sensors.frontCenter) {
+  // Charge straight if center is active, OR if both left and right are active (balanced targets)
+  if (sensors.frontCenter || (sensors.frontLeft && sensors.frontRight)) {
     lastAttackLeftSpeed = attackSpeed;
     lastAttackRightSpeed = attackSpeed;
   }
