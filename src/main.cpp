@@ -1,5 +1,7 @@
 #include <Arduino.h>
-  
+#include <SharpIR.h>
+#include <QTRSensors.h>
+
 /* =========================
    MOTOR DRIVER (UART)
    SmartDriveDuo-10
@@ -17,10 +19,15 @@ HardwareSerial MotorSerial(2);
 #define LINE_BR 33   // confirm GPIO safe
 
 /* =========================
-   ENCODERS (optional debug)
+   ENCODERS (Quadrature)
 ========================= */
-#define ENC_L 32
-#define ENC_R 34
+#define ENC_L_A 32
+#define ENC_L_B 35
+#define ENC_R_A 34
+#define ENC_R_B 39
+
+volatile long encoderLeftTicks = 0;
+volatile long encoderRightTicks = 0;
 
 /* =========================
    TOF / IR ENEMY SENSORS
@@ -30,6 +37,26 @@ HardwareSerial MotorSerial(2);
 #define FRONT_RIGHT 13
 #define SIDE_LEFT 15
 #define SIDE_RIGHT 4
+
+/* =========================
+   LIBRARY INSTANTIATIONS
+========================= */
+// Sharp IR configurations
+#define SHARP_MODEL SharpIR::GP2Y0A21YK0F // default 10-80cm analog model
+const uint8_t DETECTION_THRESHOLD_CM = 50; // detect enemy if closer than 50cm
+
+SharpIR enemyFL(SHARP_MODEL, FRONT_LEFT);
+SharpIR enemyFC(SHARP_MODEL, FRONT_CENTER);
+SharpIR enemyFR(SHARP_MODEL, FRONT_RIGHT);
+SharpIR enemySL(SHARP_MODEL, SIDE_LEFT);
+SharpIR enemySR(SHARP_MODEL, SIDE_RIGHT);
+
+// QTR reflectance sensor configurations
+QTRSensors qtr;
+const uint8_t QTR_SENSOR_COUNT = 4;
+uint16_t qtrValues[QTR_SENSOR_COUNT];
+const uint16_t QTR_THRESHOLD = 500; // raw readings below this = white line detected
+// #define QTR_USE_ANALOG // uncomment if using analog QTR sensors
 
 /* =========================
    MOTOR CONTROL PARAMS
@@ -202,15 +229,15 @@ struct EnemySensors {
   bool sideRight;
 };
 
-// Returns a bitmask of triggered line sensors (LOW = triggered).
+// Returns a bitmask of triggered line sensors (raw value < QTR_THRESHOLD = triggered).
 // Bit 0: FL, Bit 1: FR, Bit 2: BL, Bit 3: BR.
 // Software debounced to filter optical/electrical noise spikes.
 uint8_t readLineSensors() {
   uint8_t mask = 0;
-  const uint8_t pins[4] = {LINE_FL, LINE_FR, LINE_BL, LINE_BR};
+  qtr.read(qtrValues);
 
-  for (int i = 0; i < 4; i++) {
-    if (digitalRead(pins[i]) == LOW) {
+  for (int i = 0; i < QTR_SENSOR_COUNT; i++) {
+    if (qtrValues[i] < QTR_THRESHOLD) {
       if (lineTriggerCount[i] < DEBOUNCE_THRESHOLD) {
         lineTriggerCount[i]++;
       }
@@ -227,11 +254,21 @@ uint8_t readLineSensors() {
 
 EnemySensors readEnemySensors() {
   EnemySensors sensors;
-  sensors.frontLeft = (digitalRead(FRONT_LEFT) == HIGH);
-  sensors.frontCenter = (digitalRead(FRONT_CENTER) == HIGH);
-  sensors.frontRight = (digitalRead(FRONT_RIGHT) == HIGH);
-  sensors.sideLeft = (digitalRead(SIDE_LEFT) == HIGH);
-  sensors.sideRight = (digitalRead(SIDE_RIGHT) == HIGH);
+
+  // Read distances in cm using fast non-blocking reads (avoidBurstRead = false)
+  int distFL = enemyFL.getDistance(false);
+  int distFC = enemyFC.getDistance(false);
+  int distFR = enemyFR.getDistance(false);
+  int distSL = enemySL.getDistance(false);
+  int distSR = enemySR.getDistance(false);
+
+  // Consider detected if distance falls within the detection threshold
+  sensors.frontLeft = (distFL > 0 && distFL <= DETECTION_THRESHOLD_CM);
+  sensors.frontCenter = (distFC > 0 && distFC <= DETECTION_THRESHOLD_CM);
+  sensors.frontRight = (distFR > 0 && distFR <= DETECTION_THRESHOLD_CM);
+  sensors.sideLeft = (distSL > 0 && distSL <= DETECTION_THRESHOLD_CM);
+  sensors.sideRight = (distSR > 0 && distSR <= DETECTION_THRESHOLD_CM);
+
   return sensors;
 }
 
@@ -319,6 +356,25 @@ void searchOpponent() {
 }
 
 /* =========================
+   ENCODER ISR INTERRUPTS
+========================= */
+void IRAM_ATTR readEncoderLeft() {
+  if (digitalRead(ENC_L_B) == HIGH) {
+    encoderLeftTicks++;
+  } else {
+    encoderLeftTicks--;
+  }
+}
+
+void IRAM_ATTR readEncoderRight() {
+  if (digitalRead(ENC_R_B) == HIGH) {
+    encoderRightTicks++;
+  } else {
+    encoderRightTicks--;
+  }
+}
+
+/* =========================
    SETUP
 ========================= */
 void setup() {
@@ -328,20 +384,30 @@ void setup() {
   MotorSerial.begin(19200, SERIAL_8N1, MOTOR_RX, MOTOR_TX);
   stopMotor(); // ensure motors stopped on boot
 
-  pinMode(LINE_FL, INPUT_PULLUP);
-  pinMode(LINE_FR, INPUT_PULLUP);
-  pinMode(LINE_BL, INPUT_PULLUP);
-  pinMode(LINE_BR, INPUT_PULLUP);
+  // Initialize QTR reflectance sensor array
+#ifdef QTR_USE_ANALOG
+  qtr.setTypeAnalog();
+#else
+  qtr.setTypeRC();
+#endif
+  qtr.setSensorPins((const uint8_t[]){LINE_FL, LINE_FR, LINE_BL, LINE_BR}, QTR_SENSOR_COUNT);
 
+  // Sharp IR sensor pins as inputs
   pinMode(FRONT_LEFT, INPUT);
   pinMode(FRONT_CENTER, INPUT);
   pinMode(FRONT_RIGHT, INPUT);
-
   pinMode(SIDE_LEFT, INPUT);
   pinMode(SIDE_RIGHT, INPUT);
 
-  pinMode(ENC_L, INPUT);
-  pinMode(ENC_R, INPUT);
+  // Initialize Quadrature Encoder pins
+  pinMode(ENC_L_A, INPUT);
+  pinMode(ENC_L_B, INPUT);
+  pinMode(ENC_R_A, INPUT);
+  pinMode(ENC_R_B, INPUT);
+
+  // Attach interrupts to ENC_A pins
+  attachInterrupt(digitalPinToInterrupt(ENC_L_A), readEncoderLeft, RISING);
+  attachInterrupt(digitalPinToInterrupt(ENC_R_A), readEncoderRight, RISING);
 
   Serial.println("[BOOT] Waiting 5s (competition delay)...");
   delay(5000); // competition arm delay
