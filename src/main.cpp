@@ -58,6 +58,14 @@ int motorBaseSpeed = 180;
 int motorTurnSpeed = 160;
 int motorAttackSpeed = 255;
 
+// Encoder navigation settings
+long recoveryBackupTicks = 350;             // target ticks to back up during straight escape
+long recoverySpinTicks = 250;               // target ticks to spin during recovery turn
+uint32_t stuckCheckIntervalMs = 300;        // interval in ms to check if wheels are stuck
+long stuckMinTicks = 15;                    // minimum ticks moved to not be considered stuck
+uint32_t recoveryTimeoutMs = 600;           // safety timeout in ms for recovery phases
+float lungeKP = 0.5;                        // proportional steering correction for lunge
+
 /* =========================
    LIBRARY INSTANTIATIONS
 ========================= */
@@ -108,6 +116,15 @@ uint32_t lungeStartTime = 0;
 uint32_t searchStartTime = 0;
 int searchSpinSign = 1; // 1 = spin right, -1 = spin left
 
+// Encoder tracking variables
+long recoveryStartLeftTicks = 0;
+long recoveryStartRightTicks = 0;
+long lungeStartLeftTicks = 0;
+long lungeStartRightTicks = 0;
+uint32_t lastStuckCheckTime = 0;
+long lastStuckLeftTicks = 0;
+long lastStuckRightTicks = 0;
+
 // State name lookup for debug logging
 const char* stateNames[] = {"SEARCH", "ATTACK", "RECOVER", "LUNGE"};
 
@@ -116,9 +133,17 @@ void enterState(State newState) {
   Serial.println(stateNames[newState]);
 
   currentState = newState;
+
+  // Reset stuck check parameters on state entry
+  lastStuckCheckTime = millis();
+  lastStuckLeftTicks = encoderLeftTicks;
+  lastStuckRightTicks = encoderRightTicks;
+
   if (newState == RECOVER) {
     recoveryStartTime = millis();
     recoveryPhase = 1; // start in straight escape phase
+    recoveryStartLeftTicks = encoderLeftTicks;
+    recoveryStartRightTicks = encoderRightTicks;
 
     // Capture which sensors triggered the edge (using QTR raw values and threshold)
     bool fl = (qtrValues[0] < qtrLineThreshold);
@@ -160,6 +185,8 @@ void enterState(State newState) {
 
   if (newState == LUNGE) {
     lungeStartTime = millis();
+    lungeStartLeftTicks = encoderLeftTicks;
+    lungeStartRightTicks = encoderRightTicks;
   }
 
   if (newState == SEARCH) {
@@ -459,25 +486,65 @@ void loop() {
     }
   }
 
+  // Stuck Detection (Only in SEARCH or LUNGE states)
+  if (currentState == SEARCH || currentState == LUNGE) {
+    if (millis() - lastStuckCheckTime >= stuckCheckIntervalMs) {
+      long deltaL = abs(encoderLeftTicks - lastStuckLeftTicks);
+      long deltaR = abs(encoderRightTicks - lastStuckRightTicks);
+      
+      // If we commanded movement but encoders barely moved, we are stuck
+      bool stuck = (deltaL < stuckMinTicks && deltaR < stuckMinTicks);
+      
+      lastStuckLeftTicks = encoderLeftTicks;
+      lastStuckRightTicks = encoderRightTicks;
+      lastStuckCheckTime = millis();
+      
+      if (stuck) {
+        Serial.println("[STUCK] Robot is stuck! Triggering recovery...");
+        enterState(RECOVER);
+      }
+    }
+  }
+
   // State Execution
   switch (currentState) {
     case LUNGE:
-      setMotor(motorAttackSpeed, motorAttackSpeed); // full speed ahead
+      {
+        // Closed-loop straight-line correction using encoders
+        long diffL = encoderLeftTicks - lungeStartLeftTicks;
+        long diffR = encoderRightTicks - lungeStartRightTicks;
+        long error = diffL - diffR; // positive if left is ahead
+        
+        int correction = (int)(error * lungeKP);
+        int leftSpeed = motorAttackSpeed - correction;
+        int rightSpeed = motorAttackSpeed + correction;
+        
+        setMotor(leftSpeed, rightSpeed);
+      }
       break;
 
     case RECOVER:
       {
         uint32_t elapsed = millis() - recoveryStartTime;
+        long distL = abs(encoderLeftTicks - recoveryStartLeftTicks);
+        long distR = abs(encoderRightTicks - recoveryStartRightTicks);
+        long avgDist = (distL + distR) / 2;
+
         if (recoveryPhase == 1) {
-          if (elapsed < 150) {
+          // Phase 1: Straight escape
+          if (avgDist < recoveryBackupTicks && elapsed < recoveryTimeoutMs) {
             setMotor(escapeLeftSpeed, escapeRightSpeed);
           } else {
+            // Transition to Phase 2 (Spin escape)
             recoveryPhase = 2;
             recoveryStartTime = millis();
+            recoveryStartLeftTicks = encoderLeftTicks;
+            recoveryStartRightTicks = encoderRightTicks;
             setMotor(spinLeftSpeed, spinRightSpeed);
           }
         } else if (recoveryPhase == 2) {
-          if (elapsed < 200) {
+          // Phase 2: Spin escape
+          if (avgDist < recoverySpinTicks && elapsed < recoveryTimeoutMs) {
             setMotor(spinLeftSpeed, spinRightSpeed);
           } else {
             enterState(SEARCH);
